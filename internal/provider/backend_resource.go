@@ -6,16 +6,13 @@ package provider
 import (
 	"context"
 	"fmt"
-	"net/http"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/hashicorp/terraform-plugin-log/tflog"
+	"github.com/paragor/terraform-provider-trinogateway/internal/trinogatewayclient"
 )
 
 // Ensure provider defined types fully satisfy framework interfaces.
@@ -28,14 +25,17 @@ func NewBackendResource() resource.Resource {
 
 // BackendResource defines the resource implementation.
 type BackendResource struct {
-	client *http.Client
+	client trinogatewayclient.TrinoGatewayClient
 }
 
 // BackendResourceModel describes the resource data model.
 type BackendResourceModel struct {
-	ConfigurableAttribute types.String `tfsdk:"configurable_attribute"`
-	Defaulted             types.String `tfsdk:"defaulted"`
-	Id                    types.String `tfsdk:"id"`
+	Id           types.String `tfsdk:"id"`
+	Name         types.String `tfsdk:"name"`
+	ProxyTo      types.String `tfsdk:"proxy_to"`
+	Active       types.Bool   `tfsdk:"active"`
+	RoutingGroup types.String `tfsdk:"routing_group"`
+	ExternalUrl  types.String `tfsdk:"external_url"`
 }
 
 func (r *BackendResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -44,23 +44,39 @@ func (r *BackendResource) Metadata(ctx context.Context, req resource.MetadataReq
 
 func (r *BackendResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		// This description is used by the documentation generator and the language server.
-		MarkdownDescription: "Example resource",
+		MarkdownDescription: "Backend configration",
 
 		Attributes: map[string]schema.Attribute{
-			"configurable_attribute": schema.StringAttribute{
-				MarkdownDescription: "Example configurable attribute",
-				Optional:            true,
-			},
-			"defaulted": schema.StringAttribute{
-				MarkdownDescription: "Example configurable attribute with default value",
-				Optional:            true,
-				Computed:            true,
-				Default:             stringdefault.StaticString("example value when not configured"),
-			},
 			"id": schema.StringAttribute{
 				Computed:            true,
-				MarkdownDescription: "Example identifier",
+				MarkdownDescription: "Internal id for terraform provider",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"name": schema.StringAttribute{
+				MarkdownDescription: "Name of backend",
+				Required:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
+			},
+			"proxy_to": schema.StringAttribute{
+				MarkdownDescription: "Backend url",
+				Required:            true,
+			},
+			"active": schema.BoolAttribute{
+				MarkdownDescription: "Backend activation",
+				Required:            true,
+			},
+			"routing_group": schema.StringAttribute{
+				MarkdownDescription: "Routing group name",
+				Required:            true,
+			},
+			"external_url": schema.StringAttribute{
+				MarkdownDescription: "If the backend URL is different from the proxyTo URL (for example if they are internal vs. external hostnames)",
+				Optional:            true,
+				Computed:            true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
@@ -75,14 +91,13 @@ func (r *BackendResource) Configure(ctx context.Context, req resource.ConfigureR
 		return
 	}
 
-	client, ok := req.ProviderData.(*http.Client)
+	client, ok := req.ProviderData.(trinogatewayclient.TrinoGatewayClient)
 
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *http.Client, got: %T. Please report this issue to the provider developers.", req.ProviderData),
+			fmt.Sprintf("Expected trinogatewayclient.TrinoGatewayClient, got: %T. Please report this issue to the provider developers.", req.ProviderData),
 		)
-
 		return
 	}
 
@@ -98,24 +113,27 @@ func (r *BackendResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	backend := &trinogatewayclient.Backend{
+		Name:         data.Name.ValueString(),
+		ProxyTo:      data.ProxyTo.ValueString(),
+		RoutingGroup: data.RoutingGroup.ValueString(),
+		Active:       data.Active.ValueBool(),
+	}
+	if data.ExternalUrl.IsNull() || data.ExternalUrl.IsUnknown() {
+		data.ExternalUrl = types.StringValue(data.ProxyTo.ValueString())
+	}
+	backend.ExternalUrl = data.ExternalUrl.ValueString()
 
-	// If applicable, this is a great opportunity to initialize any necessary
-	// provider client data and make a call using it.
-	// httpResp, err := r.client.Do(httpReq)
-	// if err != nil {
-	//     resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create example, got error: %s", err))
-	//     return
-	// }
+	err := r.client.AddOrUpdateBackend(ctx, backend)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Client Error",
+			fmt.Sprintf("Unable to add backend, got error: %s", err),
+		)
+		return
+	}
 
-	// For the purposes of this example code, hardcoding a response value to
-	// save into the Terraform state.
-	data.Id = types.StringValue("example-id")
-
-	// Write logs using the tflog package
-	// Documentation: https://terraform.io/plugin/log
-	tflog.Trace(ctx, "created a resource")
-
-	// Save data into Terraform state
+	data.Id = types.StringValue(data.Name.ValueString())
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -129,15 +147,26 @@ func (r *BackendResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	// If applicable, this is a great opportunity to initialize any necessary
-	// provider client data and make a call using it.
-	// httpResp, err := r.client.Do(httpReq)
-	// if err != nil {
-	//     resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to read example, got error: %s", err))
-	//     return
-	// }
+	backends, err := r.client.GetAllBackends(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to list backends, got error: %s", err))
+		return
+	}
 
-	// Save updated data into Terraform state
+	var foundBackend *trinogatewayclient.Backend
+	for _, backend := range backends {
+		if backend.Name == data.Name.ValueString() {
+			foundBackend = backend
+		}
+	}
+
+	if foundBackend == nil {
+		resp.State.RemoveResource(ctx)
+		return
+	}
+
+	backendDomainToTfModel(foundBackend, &data)
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -151,13 +180,24 @@ func (r *BackendResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	// If applicable, this is a great opportunity to initialize any necessary
-	// provider client data and make a call using it.
-	// httpResp, err := r.client.Do(httpReq)
-	// if err != nil {
-	//     resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to update example, got error: %s", err))
-	//     return
-	// }
+	backend := &trinogatewayclient.Backend{
+		Name:         data.Name.ValueString(),
+		ProxyTo:      data.ProxyTo.ValueString(),
+		RoutingGroup: data.RoutingGroup.ValueString(),
+		Active:       data.Active.ValueBool(),
+	}
+	if data.ExternalUrl.IsNull() || data.ExternalUrl.IsUnknown() {
+		data.ExternalUrl = types.StringValue(data.ProxyTo.ValueString())
+	}
+	backend.ExternalUrl = data.ExternalUrl.ValueString()
+	err := r.client.AddOrUpdateBackend(ctx, backend)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Client Error",
+			fmt.Sprintf("Unable to update backend, got error: %s", err),
+		)
+		return
+	}
 
 	// Save updated data into Terraform state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -173,15 +213,40 @@ func (r *BackendResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	// If applicable, this is a great opportunity to initialize any necessary
-	// provider client data and make a call using it.
-	// httpResp, err := r.client.Do(httpReq)
-	// if err != nil {
-	//     resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to delete example, got error: %s", err))
-	//     return
-	// }
+	if err := r.client.DeleteBackend(ctx, data.Name.ValueString()); err != nil {
+		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to delete backend, got error: %s", err))
+		return
+	}
 }
 
 func (r *BackendResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	backendName := req.ID
+
+	backends, err := r.client.GetAllBackends(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to list backends, got error: %s", err))
+		return
+	}
+
+	var foundBackend *trinogatewayclient.Backend
+	for _, backend := range backends {
+		if backend.Name == backendName {
+			foundBackend = backend
+		}
+	}
+	if foundBackend == nil {
+		resp.Diagnostics.AddError("Backend not found", "Backend not found")
+	}
+	var data BackendResourceModel
+	backendDomainToTfModel(foundBackend, &data)
+
+	resp.State.Set(ctx, &data)
+}
+
+func backendDomainToTfModel(domainmodel *trinogatewayclient.Backend, tfmodel *BackendResourceModel) {
+	tfmodel.Active = types.BoolValue(domainmodel.Active)
+	tfmodel.ProxyTo = types.StringValue(domainmodel.ProxyTo)
+	tfmodel.Name = types.StringValue(domainmodel.Name)
+	tfmodel.RoutingGroup = types.StringValue(domainmodel.RoutingGroup)
+	tfmodel.ExternalUrl = types.StringValue(domainmodel.ExternalUrl)
 }

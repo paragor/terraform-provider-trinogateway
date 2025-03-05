@@ -5,13 +5,14 @@ package provider
 
 import (
 	"context"
-	"net/http"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/paragor/terraform-provider-trinogateway/internal/trinogatewayclient"
 )
 
 // Ensure TrinoGatewayProvider satisfies various provider interfaces.
@@ -28,6 +29,8 @@ type TrinoGatewayProvider struct {
 // TrinoGatewayProviderModel describes the provider data model.
 type TrinoGatewayProviderModel struct {
 	Endpoint types.String `tfsdk:"endpoint"`
+	Login    types.String `tfsdk:"login"`
+	Password types.String `tfsdk:"password"`
 }
 
 func (p *TrinoGatewayProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -39,8 +42,18 @@ func (p *TrinoGatewayProvider) Schema(ctx context.Context, req provider.SchemaRe
 	resp.Schema = schema.Schema{
 		Attributes: map[string]schema.Attribute{
 			"endpoint": schema.StringAttribute{
-				MarkdownDescription: "Example provider attribute",
+				MarkdownDescription: "Trino gateway endpoint",
+				Required:            true,
+			},
+			"login": schema.StringAttribute{
+				MarkdownDescription: "login",
 				Optional:            true,
+				Sensitive:           true,
+			},
+			"password": schema.StringAttribute{
+				MarkdownDescription: "password",
+				Optional:            true,
+				Sensitive:           true,
 			},
 		},
 	}
@@ -55,11 +68,40 @@ func (p *TrinoGatewayProvider) Configure(ctx context.Context, req provider.Confi
 		return
 	}
 
-	// Configuration values are now available.
-	// if data.Endpoint.IsNull() { /* ... */ }
+	if data.Endpoint.IsNull() {
+		resp.Diagnostics.AddError(
+			"Endpoint for trino gateway client is not specify",
+			"Cant configure trino gateway client: endpoint is not specified",
+		)
+		return
+	}
 
+	var auth *trinogatewayclient.Auth
+	if !data.Login.IsNull() {
+		if data.Password.IsNull() {
+			resp.Diagnostics.AddError(
+				"Cant configure trino gateway client auth",
+				"Cant configure trino gateway client auth: if login set, password should be set too",
+			)
+			return
+		}
+		auth = &trinogatewayclient.Auth{
+			Login:    data.Login.ValueString(),
+			Password: data.Password.ValueString(),
+		}
+	}
 	// Example client configuration for data sources and resources
-	client := http.DefaultClient
+	client, err := trinogatewayclient.NewTrinoGatewayClient(
+		data.Endpoint.ValueString(),
+		auth,
+	)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Cant configure trino gateway client",
+			fmt.Sprintf("cant configure trino gateway client: %s", err.Error()),
+		)
+		return
+	}
 	resp.DataSourceData = client
 	resp.ResourceData = client
 }

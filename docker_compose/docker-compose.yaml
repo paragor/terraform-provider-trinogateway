@@ -1,0 +1,38 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: MPL-2.0
+
+services:
+  trino-gateway:
+    image: trinodb/trino-gateway:14
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/lib/trino-gateway/bin/health-check || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    ports:
+      - "18080:8080"
+    volumes:
+      - target: /opt/trino/gateway-ha-config.yml
+        source: ./config.yaml
+        type: bind
+
+  postgres:
+    image: postgres
+    environment:
+      - PGPORT=5432
+      - POSTGRES_PASSWORD=P0stG&es
+      - POSTGRES_DB=trino_gateway_db
+      - POSTGRES_USER=trino_gateway_db_admin
+    ports:
+      - "5432:5432"
+    healthcheck:
+      # Need user and database name to check PostgreSQL server status
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 10s
