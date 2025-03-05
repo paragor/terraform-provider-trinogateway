@@ -1,3 +1,3 @@
-provider "scaffolding" {
+provider "trinogateway" {
   # example configuration here
 }
